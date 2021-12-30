@@ -1,19 +1,25 @@
 import * as fs from "fs"; // Filesystem
-import axios from "axios"; // Requests
 import { logger } from "./logger"; // Logging
 import { providers } from "ethers"; // RPC for ENS names
+import Twitter from "twitter";
 
 // Regex matches for addresses and ENS names
 const addressRegex: RegExp = /(0x[a-zA-Z0-9])\w+/;
 const ENSRegex: RegExp = /([a-zA-Z0-9]\w+.(eth|ETH))/;
-
 export default class Scraper {
   // Optional RPC to resolve ENS names to addresses
   rpc?: providers.JsonRpcProvider | null;
   // Tweet conversation ID
   conversationID: string;
-  // Twitter token
+  // Twitter tokens
   twitterBearer: string;
+  twitterConsumerKey: string;
+  twitterConsumerSecret: string;
+  twitterAccessTokenKey: string;
+  twitterAccessTokenSecret: string;
+  twitterEndpoint: string;
+  twitterQuery: string;
+  client: Twitter;
   // Number of tokens to distribute per address
   numTokens: number;
 
@@ -26,18 +32,43 @@ export default class Scraper {
    * Setup scraper
    * @param {string} conversationID to scrape
    * @param {string} twitterBearer 2.0 token
+   * @param {string} twitterConsumerKey
+   * @param {string} twitterConsumerSecret
+   * @param {string} twitterAccessTokenKey
+   * @param {string} twitterAccessTokenSecret
+   * @param {string} twitterEndpoint
+   * @param {string} twitterQuery
    * @param {number} numTokens to distribute per address
    * @param {string?} rpcProvider optional rpc endpoint to convert ENS names
    */
   constructor(
     conversationID: string,
     twitterBearer: string,
+    twitterConsumerKey: string,
+    twitterConsumerSecret: string,
+    twitterAccessTokenKey: string,
+    twitterAccessTokenSecret: string,
+    twitterEndpoint: string,
+    twitterQuery: string,
     numTokens: number,
     rpcProvider?: string
   ) {
     this.conversationID = conversationID;
     this.twitterBearer = twitterBearer;
+    this.twitterConsumerKey = twitterConsumerKey;
+    this.twitterConsumerSecret = twitterConsumerSecret;
+    this.twitterAccessTokenKey = twitterAccessTokenKey;
+    this.twitterAccessTokenSecret = twitterAccessTokenSecret;
+    this.twitterEndpoint = twitterEndpoint;
+    this.twitterQuery = twitterQuery;
     this.numTokens = numTokens;
+
+    this.client = new Twitter({
+      consumer_key: twitterConsumerKey,
+      consumer_secret: twitterConsumerSecret,
+      access_token_key: twitterAccessTokenKey,
+      access_token_secret: twitterAccessTokenSecret
+    });
 
     if (rpcProvider) {
       this.rpc = new providers.JsonRpcProvider(rpcProvider);
@@ -45,47 +76,29 @@ export default class Scraper {
   }
 
   /**
-   * Generates endpoint to query for tweets from a thread
-   * @param {string?} nextToken if paginating tweets
-   * @returns {string} endpoint url
-   */
-  generateEndpoint(nextToken?: string): string {
-    const baseEndpoint: string =
-      "https://api.twitter.com/2/tweets/search/recent?query=conversation_id:" +
-      // Append conversation ID
-      this.conversationID +
-      // Collect max allowed results
-      "&max_results=100";
-
-    // If paginating, append next_token to endpoint
-    return nextToken ? `${baseEndpoint}&next_token=${nextToken}` : baseEndpoint;
-  }
-
-  /**
    * Recursively collect tweets from a thread (max. 100 per run)
    * @param {string?} nextSearchToken optional pagination token
    */
-  async collectTweets(nextSearchToken?: string): Promise<void> {
-    // Collect tweets
-    const response = await axios({
-      method: "GET",
-      url: this.generateEndpoint(nextSearchToken),
-      headers: {
-        Authorization: `Bearer ${this.twitterBearer}`
-      }
+  async collectTweets(next?: string): Promise<void> {
+    const get = new Promise((resolve, reject) => {
+      this.client.get(
+        this.twitterEndpoint,
+        { query: this.twitterQuery, next },
+        function (error, tweets, response) {
+          resolve(tweets);
+        }
+      );
     });
 
-    // Append new tweets
-    const tweets: Record<string, string>[] = response.data.data;
-    this.tweets.push(...response.data.data);
-    logger.info(`Collected ${tweets.length} tweets`);
+    await get.then(async (tweets) => {
+      // @ts-ignore
+      this.tweets.push(...tweets.results);
+      // @ts-ignore
+      logger.info(`Collected ${tweets.results.length} tweets`);
 
-    const nextToken: string | undefined = response.data.meta.next_token;
-    // If pagination token exists:
-    if (nextToken) {
-      // Collect next page of tweets
-      await this.collectTweets(nextToken);
-    }
+      // @ts-ignore
+      if (tweets.next) await this.collectTweets(tweets.next);
+    });
   }
 
   /**
@@ -129,7 +142,9 @@ export default class Scraper {
       // If ENS name
       if (address.includes(".eth")) {
         // Resolve name via RPC
-        const parsed: string | undefined = await this.rpc?.resolveName(address);
+        const parsed: string | null | undefined = await this.rpc?.resolveName(
+          address
+        );
         if (parsed) {
           // If successful resolve, push name
           convertedAddresses.push(parsed);
